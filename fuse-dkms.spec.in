@@ -1,0 +1,40 @@
+#
+# Distribute kernel module via dkms
+#
+
+Name: %{RPMNAME}
+Version: %{PACKAGE_VERSION}
+Release: %{RELEASE}
+Summary: %{WHAT}
+License: GPL version 2
+Group: Hardware/Other
+Packager: IME Development Team <support@ddn.com>
+Source: /usr/src/%{MODNAME}-%{PACKAGE_VERSION}
+URL: http://www.ddn.com
+Distribution: IME
+Vendor: DataDirect Networks, Inc
+BuildArchitectures: noarch
+Requires: dkms kernel-devel
+BuildRoot: %{_tmppath}/build-%{RPMNAME}-%{PACKAGE_VERSION}
+
+%description
+Revision: %{PACKAGE_VERSION}-%{RELEASE}-%{SUBRELEASE}
+
+%install
+%{__mkdir_p} ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}
+%{__cp} -a %{_topdir}/../src/* ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}/
+%{__cp} %{_topdir}/../dkms.conf ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}/
+
+%files
+/usr/src/%{MODNAME}-%{PACKAGE_VERSION}
+
+%post
+dkms install --force -m %{MODNAME} -v %{PACKAGE_VERSION}
+
+#dracut -f
+
+%preun
+dkms remove -m %{MODNAME} -v %{PACKAGE_VERSION}
+
+%postun
+#dracut -f

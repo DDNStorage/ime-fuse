@@ -1,0 +1,7 @@
+# Mapping is needed to support distribution kernels
+# that have just different build numbers, but are
+# in fact internally havily patched
+
+
+# Format
+# kernel-version     directory

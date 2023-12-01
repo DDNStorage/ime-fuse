@@ -1,0 +1,14 @@
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/redfs-dkms.*
+debian/redfs-dkms/
+*.mod.cmd
+*.mod
+*.o.cmd
+*.o.d
+*.o
+fuse-dkms-*.noarch.rpm
+fuse-dkms.spec
+md5sum.dat
+
