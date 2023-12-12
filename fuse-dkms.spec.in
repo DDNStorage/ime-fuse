@@ -2,39 +2,49 @@
 # Distribute kernel module via dkms
 #
 
-Name: %{RPMNAME}
+%define _full_version %{PACKAGE_VERSION}-%{RELEASE}
+
+Name: fuse-dkms
 Version: %{PACKAGE_VERSION}
 Release: %{RELEASE}
 Summary: %{WHAT}
 License: GPL version 2
 Group: Hardware/Other
 Packager: IME Development Team <support@ddn.com>
-Source: /usr/src/%{MODNAME}-%{PACKAGE_VERSION}
+Source: /usr/src/%{MODNAME}-%{_full_version}
 URL: http://www.ddn.com
 Distribution: IME
 Vendor: DataDirect Networks, Inc
 BuildArchitectures: noarch
 Requires: dkms kernel-devel
-BuildRoot: %{_tmppath}/build-%{RPMNAME}-%{PACKAGE_VERSION}
+BuildRoot: %{_tmppath}/build-%{RPMNAME}-%{_full_version}
 
 %description
-Revision: %{PACKAGE_VERSION}-%{RELEASE}-%{SUBRELEASE}
+Revision: %{_full_version}-%{RELEASE}-%{SUBRELEASE}
 
 %install
-%{__mkdir_p} ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}
-%{__cp} -a %{_topdir}/../src/* ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}/
-%{__cp} %{_topdir}/../dkms.conf ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{PACKAGE_VERSION}/
+%{__mkdir_p} ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{_full_version}
+%{__cp} -a %{_topdir}/../src/* ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{_full_version}/
+%{__cp} %{_topdir}/../dkms.conf ${RPM_BUILD_ROOT}/usr/src/%{MODNAME}-%{_full_version}/
 
 %files
-/usr/src/%{MODNAME}-%{PACKAGE_VERSION}
+/usr/src/%{MODNAME}-%{_full_version}
 
 %post
-dkms install --force -m %{MODNAME} -v %{PACKAGE_VERSION}
+occurrences=$(/usr/sbin/dkms status | grep "%{MODNAME}" | grep "%{_full_version}" | wc -l)
+if [ occurrences > 0 ]; then
+    /usr/sbin/dkms remove -m %{MODNAME} -v %{_full_version} --all
+fi
+/usr/sbin/dkms add -m %{MODNAME} -v %{_full_version}
+/usr/sbin/dkms build -m %{MODNAME} -v %{_full_version}
+/usr/sbin/dkms install -m %{MODNAME} -v %{_full_version}
 
-#dracut -f
+dracut -f
+exit 0
 
 %preun
-dkms remove -m %{MODNAME} -v %{PACKAGE_VERSION}
+/usr/sbin/dkms remove -m %{MODNAME} -v %{_full_version} --all
+
 
 %postun
-#dracut -f
+dracut -f
