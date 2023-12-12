@@ -2629,11 +2629,12 @@ static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 
 			if (vma->vm_flags & VM_MAYWRITE)
 				fuse_file_mmap_handle_dio_writers(inode);
+		} else {
+			/* MAP_PRIVATE */
+			invalidate_inode_pages2(file->f_mapping);
+
+			return generic_file_mmap(file, vma);
 		}
-
-		invalidate_inode_pages2(file->f_mapping);
-
-		return generic_file_mmap(file, vma);
 	}
 
 	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE))
