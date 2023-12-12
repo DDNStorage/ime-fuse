@@ -2,7 +2,7 @@
 # script name: RPM_BUILD.sh
 # testing: create script to build rpm
 
-NAME="ime-nvme"
+NAME="fuse-dkms"
 
 IM_RPM_PATH="/home/jenkins/rpms/$NAME/IM_${BUILD_ID}/"
 IM_LATEST_PATH="/home/jenkins/rpms/$NAME/latest"
