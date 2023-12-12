@@ -110,6 +110,16 @@ static void fuse_release_end(struct fuse_mount *fm, struct fuse_args *args,
 			     int error)
 {
 	struct fuse_release_args *ra = container_of(args, typeof(*ra), args);
+	struct fuse_inode *fi = get_fuse_inode(ra->inode);
+
+	spin_lock(&fi->lock);
+	if (--fi->open_ctr == 0) {
+		/* no open file left anymore, remove restrictions from
+		 * the cache bit
+		 */
+		clear_bit(FUSE_I_CACHE_IO_MODE, &fi->state);
+	}
+	spin_unlock(&fi->lock);
 
 	iput(ra->inode);
 	kfree(ra);
@@ -199,14 +209,13 @@ void fuse_finish_open(struct inode *inode, struct file *file)
 {
 	struct fuse_file *ff = file->private_data;
 	struct fuse_conn *fc = get_fuse_conn(inode);
+	struct fuse_inode *fi = get_fuse_inode(inode);
 
 	if (!(ff->open_flags & FOPEN_KEEP_CACHE))
 		invalidate_inode_pages2(inode->i_mapping);
 	if (ff->open_flags & FOPEN_NONSEEKABLE)
 		nonseekable_open(inode, file);
 	if (fc->atomic_o_trunc && (file->f_flags & O_TRUNC)) {
-		struct fuse_inode *fi = get_fuse_inode(inode);
-
 		spin_lock(&fi->lock);
 		fi->attr_version = atomic64_inc_return(&fc->attr_version);
 		i_size_write(inode, 0);
@@ -217,6 +226,10 @@ void fuse_finish_open(struct inode *inode, struct file *file)
 	}
 	if ((file->f_mode & FMODE_WRITE) && fc->writeback_cache)
 		fuse_link_write_file(file);
+
+	spin_lock(&fi->lock);
+	fi->open_ctr++;
+	spin_unlock(&fi->lock);
 }
 
 int fuse_open_common(struct inode *inode, struct file *file, bool isdir)
@@ -1323,6 +1336,102 @@ static ssize_t fuse_perform_write(struct kiocb *iocb,
 	return res > 0 ? res : err;
 }
 
+static bool fuse_io_past_eof(struct kiocb *iocb, struct iov_iter *iter)
+{
+	struct inode *inode = file_inode(iocb->ki_filp);
+
+	return iocb->ki_pos + iov_iter_count(iter) > i_size_read(inode);
+}
+
+/*
+ * @return true if an exclusive lock for direct IO writes is taken, false
+ *	   for the shared lock
+ */
+bool fuse_dio_lock_inode(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct file *file = iocb->ki_filp;
+	struct inode *inode = file_inode(iocb->ki_filp);
+	struct fuse_inode *fi = get_fuse_inode(inode);
+	struct fuse_file *ff = file->private_data;
+	struct fuse_conn *fc = ff->fm->fc;
+	bool excl_lock = true;
+	bool retest = false;
+	bool wake = false;
+
+	/* server side has to advise that it supports parallel dio writes */
+	if (!(ff->open_flags & FOPEN_PARALLEL_DIRECT_WRITES))
+		goto out;
+
+	/* append will need to know the eventual eof - always needs an
+	 * exclusive lock
+	 */
+	if (iocb->ki_flags & IOCB_APPEND)
+		goto out;
+
+retest_with_lock:
+	/* parallel dio beyond eof is at least for now not supported */
+	if (fuse_io_past_eof(iocb, from))
+		goto out;
+
+	/* no need to optimize async requests */
+	if (!is_sync_kiocb(iocb) && iocb->ki_flags & IOCB_DIRECT &&
+	    fc->async_dio)
+		goto out;
+
+	/* If the inode ever got page writes, we do not know for sure
+	 * in the DIO path if these are pending - a shared lock is then
+	 * not possible
+	 */
+	spin_lock(&fi->lock);
+	if (test_bit(FUSE_I_CACHE_IO_MODE, &fi->state)) {
+		if (retest) {
+			excl_lock = true;
+			if (--fi->shared_lock_direct_io_ctr == 0)
+				wake = true;
+		}
+	} else {
+		if (!retest) {
+			excl_lock = false;
+			/* Increase the counter as soon as the decision for
+			 * shared locks was made to hold off page IO tasks
+			 */
+			if (!retest)
+				fi->shared_lock_direct_io_ctr++;
+		}
+	}
+	spin_unlock(&fi->lock);
+
+out:
+	if (retest) {
+		if (excl_lock) {
+			/* a race happened the lock type needs to change */
+			inode_unlock_shared(inode);
+
+			/* Increasing the shared_lock_direct_io_ctr counter
+			 *  might have hold off page cache tasks, wake these up.
+			 */
+			if (wake)
+				wake_up(&fi->direct_io_waitq);
+
+			inode_lock(inode);
+		}
+	} else {
+		if (excl_lock) {
+			inode_lock(inode);
+		} else {
+			inode_lock_shared(inode);
+
+			/* Need to retest after taken the shared lock, to see
+			 * if there are races
+			 */
+			retest = true;
+			goto retest_with_lock;
+		}
+	}
+
+	return excl_lock;
+}
+
 static ssize_t fuse_cache_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
@@ -1621,46 +1730,15 @@ static ssize_t fuse_direct_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	return res;
 }
 
-static bool fuse_direct_write_extending_i_size(struct kiocb *iocb,
-					       struct iov_iter *iter)
-{
-	struct inode *inode = file_inode(iocb->ki_filp);
-
-	return iocb->ki_pos + iov_iter_count(iter) > i_size_read(inode);
-}
-
 static ssize_t fuse_direct_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *inode = file_inode(iocb->ki_filp);
-	struct file *file = iocb->ki_filp;
-	struct fuse_file *ff = file->private_data;
+	struct fuse_inode *fi = get_fuse_inode(inode);
 	struct fuse_io_priv io = FUSE_IO_PRIV_SYNC(iocb);
 	ssize_t res;
-	bool exclusive_lock =
-		!(ff->open_flags & FOPEN_PARALLEL_DIRECT_WRITES) ||
-		iocb->ki_flags & IOCB_APPEND ||
-		fuse_direct_write_extending_i_size(iocb, from);
 
-	/*
-	 * Take exclusive lock if
-	 * - Parallel direct writes are disabled - a user space decision
-	 * - Parallel direct writes are enabled and i_size is being extended.
-	 *   This might not be needed at all, but needs further investigation.
-	 */
-	if (exclusive_lock)
-		inode_lock(inode);
-	else {
-		inode_lock_shared(inode);
-
-		/* A race with truncate might have come up as the decision for
-		 * the lock type was done without holding the lock, check again.
-		 */
-		if (fuse_direct_write_extending_i_size(iocb, from)) {
-			inode_unlock_shared(inode);
-			inode_lock(inode);
-			exclusive_lock = true;
-		}
-	}
+	/* take inode_lock or inode_lock_shared */
+	bool exclusive = fuse_dio_lock_inode(iocb, from);
 
 	res = generic_write_checks(iocb, from);
 	if (res > 0) {
@@ -1673,14 +1751,23 @@ static ssize_t fuse_direct_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 	fuse_invalidate_attr(inode);
 	if (res > 0) {
-		WARN_ON_ONCE(!exclusive_lock && iocb->ki_pos > i_size_read(inode));
+		WARN_ON_ONCE(!exclusive && iocb->ki_pos > i_size_read(inode));
 		fuse_write_update_size(inode, iocb->ki_pos);
 	}
 
-	if (exclusive_lock)
+	if (exclusive)
 		inode_unlock(inode);
-	else
+	else {
+		bool wake = false;
+
 		inode_unlock_shared(inode);
+		spin_lock(&fi->lock);
+		if (--fi->shared_lock_direct_io_ctr == 0)
+			wake = true;
+		spin_unlock(&fi->lock);
+		if (wake)
+			wake_up(&fi->direct_io_waitq);
+	}
 
 	return res;
 }
@@ -2503,21 +2590,46 @@ static const struct vm_operations_struct fuse_file_vm_ops = {
 	.page_mkwrite	= fuse_page_mkwrite,
 };
 
+/*
+ * direct-io with shared locks cannot handle page cache io - set an inode
+ * flag to disable shared locks and wait until remaining threads are done
+ */
+static void fuse_file_mmap_handle_dio_writers(struct inode *inode)
+{
+	struct fuse_inode *fi = get_fuse_inode(inode);
+
+	spin_lock(&fi->lock);
+	set_bit(FUSE_I_CACHE_IO_MODE, &fi->state);
+	while (fi->shared_lock_direct_io_ctr > 0) {
+		spin_unlock(&fi->lock);
+		wait_event_interruptible(fi->direct_io_waitq,
+					 fi->shared_lock_direct_io_ctr == 0);
+		spin_lock(&fi->lock);
+	}
+	spin_unlock(&fi->lock);
+}
+
 static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct fuse_file *ff = file->private_data;
+	struct inode *inode = file_inode(file);
 	struct fuse_conn *fc = ff->fm->fc;
 
 	/* DAX mmap is superior to direct_io mmap */
-	if (FUSE_IS_DAX(file_inode(file)))
+	if (FUSE_IS_DAX(inode))
 		return fuse_dax_mmap(file, vma);
 
 	if (ff->open_flags & FOPEN_DIRECT_IO) {
-		/* Can't provide the coherency needed for MAP_SHARED
-		 * if FUSE_DIRECT_IO_RELAX isn't set.
-		 */
-		if ((vma->vm_flags & VM_MAYSHARE) && !fc->direct_io_relax)
-			return -ENODEV;
+		if (vma->vm_flags & VM_MAYSHARE) {
+			/* Can't provide the coherency needed for MAP_SHARED
+			 * if FUSE_DIRECT_IO_RELAX isn't set.
+			 */
+			if (!fc->direct_io_relax)
+				return -ENODEV;
+
+			if (vma->vm_flags & VM_MAYWRITE)
+				fuse_file_mmap_handle_dio_writers(inode);
+		}
 
 		invalidate_inode_pages2(file->f_mapping);
 
@@ -3649,7 +3761,9 @@ void fuse_init_file_inode(struct inode *inode)
 	INIT_LIST_HEAD(&fi->write_files);
 	INIT_LIST_HEAD(&fi->queued_writes);
 	fi->writectr = 0;
+	fi->shared_lock_direct_io_ctr = 0;
 	init_waitqueue_head(&fi->page_waitq);
+	init_waitqueue_head(&fi->direct_io_waitq);
 	fi->writepages = RB_ROOT;
 
 	if (IS_ENABLED(CONFIG_FUSE_DAX))

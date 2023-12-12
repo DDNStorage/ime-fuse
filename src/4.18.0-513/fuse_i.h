@@ -84,6 +84,9 @@ struct fuse_inode {
 	/* Which attributes are invalid */
 	u32 inval_mask;
 
+	/* number of opened files by this inode */
+	u32 open_ctr;
+
 	/** The sticky bit in inode->i_mode may have been removed, so
 	    preserve the original mode */
 	umode_t orig_i_mode;
@@ -107,11 +110,17 @@ struct fuse_inode {
 			 * (FUSE_NOWRITE) means more writes are blocked */
 			int writectr;
 
+			/* counter of tasks with shared lock direct-io writes */
+			int shared_lock_direct_io_ctr;
+
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
 
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
+
+			/* waitq for direct-io completion */
+			wait_queue_head_t direct_io_waitq;
 		};
 
 		/* readdir cache (directory only) */
@@ -174,6 +183,9 @@ enum {
 	FUSE_I_SIZE_UNSTABLE,
 	/* Bad inode */
 	FUSE_I_BAD,
+	/* Has page cache IO */
+	FUSE_I_CACHE_IO_MODE,
+
 };
 
 struct fuse_conn;
