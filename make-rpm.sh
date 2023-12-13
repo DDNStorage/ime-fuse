@@ -3,7 +3,7 @@ set -e
 
 RPMNAME=fuse-dkms
 MODNAME=fuse
-BUILD_VERSION=1.0
+PACKAGE_VERSION=1.0
 WHAT="fuse kernel module with feature backports"
 DESCRIPTION="fuse kernel module with feature backports"
 CHROOT=''
@@ -79,7 +79,7 @@ ${CHROOT} rpmbuild -bb ${RPMNAME}.spec \
     --define "%MODNAME ${MODNAME}" \
     --define "%WHAT ${WHAT}" \
     --define "%RELEASE ${BUILD_RELEASE}" \
-    --define "%PACKAGE_VERSION ${BUILD_VERSION}" \
+    --define "%PACKAGE_VERSION ${PACKAGE_VERSION}" \
     --define "%SUBRELEASE ${SUBRELEASE}" \
     --define "_topdir ${BUILD_PATH}" \
     || exit 1
